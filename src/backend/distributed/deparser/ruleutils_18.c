@@ -795,6 +795,11 @@ set_rtable_names(deparse_namespace *dpns, List *parent_namespaces,
 			/* Unnamed join has no refname */
 			refname = NULL;
 		}
+		else if (rte->rtekind == RTE_GROUP)
+		{
+			/* Use the name of the group */
+			refname = NULL;
+		}
 		else
 		{
 			/* Otherwise use whatever the parser assigned */
