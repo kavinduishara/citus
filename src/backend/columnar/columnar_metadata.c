@@ -1418,14 +1418,12 @@ UpdateStripeMetadataRow(uint64 storageId, uint64 stripeId, bool *update,
 	HeapTuple oldTuple = systable_getnext(scanDescriptor);
 	if (!HeapTupleIsValid(oldTuple))
 	{
-		ereport(ERROR,
-				(errmsg("attempted to modify an unexpected stripe, "
-						"columnar storage with id=" UINT64_FORMAT
-						" does not have stripe with id=" UINT64_FORMAT,
-						storageId, stripeId)));
+		ereport(ERROR, (errmsg("attempted to modify an unexpected stripe, "
+							   "columnar storage with id=" UINT64_FORMAT
+							   " does not have stripe with id=" UINT64_FORMAT,
+							   storageId, stripeId)));
 	}
 
-	/* ---------------- construct the new tuple ---------------- */
 	bool newNulls[Natts_columnar_stripe] = { false };
 	TupleDesc tupleDescriptor = RelationGetDescr(columnarStripes);
 	HeapTuple modifiedTuple = heap_modify_tuple(oldTuple,
@@ -1434,27 +1432,39 @@ UpdateStripeMetadataRow(uint64 storageId, uint64 stripeId, bool *update,
 												newNulls,
 												update);
 
-#if PG_VERSION_NUM < 180000
+#if PG_VERSION_NUM < PG_VERSION_18
 
-	/* Fast path: true in‑place update (same physical tuple) */
+	/*
+	 * heap_inplace_update already doesn't allow changing size of the original
+	 * tuple, so we don't allow setting any Datum's to NULL values.
+	 */
 	heap_inplace_update(columnarStripes, modifiedTuple);
-	HeapTuple newTuple = oldTuple;  /* contents overwritten in place */
+
+	/*
+	 * Existing tuple now contains modifications, because we used
+	 * heap_inplace_update().
+	 */
+	HeapTuple newTuple = oldTuple;
 #else
 
 	/* Regular catalog UPDATE keeps indexes in sync */
 	CatalogTupleUpdate(columnarStripes, &oldTuple->t_self, modifiedTuple);
-	HeapTuple newTuple = modifiedTuple;  /* freshly written tuple */
+	HeapTuple newTuple = modifiedTuple;
 #endif
 
 	CommandCounterIncrement();
 
-	/* Build StripeMetadata from the up‑to‑date tuple */
+	/*
+	 * Must not pass modifiedTuple, because BuildStripeMetadata expects a real
+	 * heap tuple with MVCC fields.
+	 */
 	StripeMetadata *modifiedStripeMetadata =
 		BuildStripeMetadata(columnarStripes, newTuple);
 
 	systable_endscan(scanDescriptor);
 	table_close(columnarStripes, openLockMode);
 
+	/* return StripeMetadata object built from modified tuple */
 	return modifiedStripeMetadata;
 }
 
