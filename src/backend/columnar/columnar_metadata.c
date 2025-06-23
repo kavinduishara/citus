@@ -1392,14 +1392,16 @@ UpdateStripeMetadataRow(uint64 storageId, uint64 stripeId, bool *update,
 	Oid columnarStripesOid = ColumnarStripeRelationId();
 
 #if PG_VERSION_NUM >= 180000
-    /* CatalogTupleUpdate performs a normal heap UPDATE → RowExclusiveLock */
-    const LOCKMODE openLockMode = RowExclusiveLock;
+
+	/* CatalogTupleUpdate performs a normal heap UPDATE → RowExclusiveLock */
+	const LOCKMODE openLockMode = RowExclusiveLock;
 #else
-    /* In‑place update never changed tuple length → AccessShareLock was enough */
-    const LOCKMODE openLockMode = AccessShareLock;
+
+	/* In‑place update never changed tuple length → AccessShareLock was enough */
+	const LOCKMODE openLockMode = AccessShareLock;
 #endif
 
-    Relation columnarStripes = table_open(columnarStripesOid, openLockMode);
+	Relation columnarStripes = table_open(columnarStripesOid, openLockMode);
 
 	Oid indexId = ColumnarStripePKeyIndexRelationId();
 	bool indexOk = OidIsValid(indexId);
@@ -1413,43 +1415,47 @@ UpdateStripeMetadataRow(uint64 storageId, uint64 stripeId, bool *update,
 		loggedSlowMetadataAccessWarning = true;
 	}
 
-    HeapTuple oldTuple = systable_getnext(scanDescriptor);
-    if (!HeapTupleIsValid(oldTuple))
-        ereport(ERROR,
-                (errmsg("attempted to modify an unexpected stripe, "
-                        "columnar storage with id=" UINT64_FORMAT
-                        " does not have stripe with id=" UINT64_FORMAT,
-                        storageId, stripeId)));
+	HeapTuple oldTuple = systable_getnext(scanDescriptor);
+	if (!HeapTupleIsValid(oldTuple))
+	{
+		ereport(ERROR,
+				(errmsg("attempted to modify an unexpected stripe, "
+						"columnar storage with id=" UINT64_FORMAT
+						" does not have stripe with id=" UINT64_FORMAT,
+						storageId, stripeId)));
+	}
 
-    /* ---------------- construct the new tuple ---------------- */
-    bool      newNulls[Natts_columnar_stripe] = {false};
-    TupleDesc tupleDescriptor = RelationGetDescr(columnarStripes);
-    HeapTuple modifiedTuple   = heap_modify_tuple(oldTuple,
-                                                 tupleDescriptor,
-                                                 newValues,
-                                                 newNulls,
-                                                 update);
+	/* ---------------- construct the new tuple ---------------- */
+	bool newNulls[Natts_columnar_stripe] = { false };
+	TupleDesc tupleDescriptor = RelationGetDescr(columnarStripes);
+	HeapTuple modifiedTuple = heap_modify_tuple(oldTuple,
+												tupleDescriptor,
+												newValues,
+												newNulls,
+												update);
 
 #if PG_VERSION_NUM < 180000
-    /* Fast path: true in‑place update (same physical tuple) */
-    heap_inplace_update(columnarStripes, modifiedTuple);
-    HeapTuple newTuple = oldTuple;  /* contents overwritten in place */
+
+	/* Fast path: true in‑place update (same physical tuple) */
+	heap_inplace_update(columnarStripes, modifiedTuple);
+	HeapTuple newTuple = oldTuple;  /* contents overwritten in place */
 #else
-    /* Regular catalog UPDATE keeps indexes in sync */
-    CatalogTupleUpdate(columnarStripes, &oldTuple->t_self, modifiedTuple);
-    HeapTuple newTuple = modifiedTuple;  /* freshly written tuple */
+
+	/* Regular catalog UPDATE keeps indexes in sync */
+	CatalogTupleUpdate(columnarStripes, &oldTuple->t_self, modifiedTuple);
+	HeapTuple newTuple = modifiedTuple;  /* freshly written tuple */
 #endif
 
-    CommandCounterIncrement();
+	CommandCounterIncrement();
 
-    /* Build StripeMetadata from the up‑to‑date tuple */
-    StripeMetadata *modifiedStripeMetadata =
-        BuildStripeMetadata(columnarStripes, newTuple);
+	/* Build StripeMetadata from the up‑to‑date tuple */
+	StripeMetadata *modifiedStripeMetadata =
+		BuildStripeMetadata(columnarStripes, newTuple);
 
-    systable_endscan(scanDescriptor);
-    table_close(columnarStripes, openLockMode);
+	systable_endscan(scanDescriptor);
+	table_close(columnarStripes, openLockMode);
 
-    return modifiedStripeMetadata;
+	return modifiedStripeMetadata;
 }
 
 
