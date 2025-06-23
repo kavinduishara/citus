@@ -1391,7 +1391,15 @@ UpdateStripeMetadataRow(uint64 storageId, uint64 stripeId, bool *update,
 
 	Oid columnarStripesOid = ColumnarStripeRelationId();
 
-	Relation columnarStripes = table_open(columnarStripesOid, AccessShareLock);
+#if PG_VERSION_NUM >= 180000
+    /* CatalogTupleUpdate performs a normal heap UPDATE → RowExclusiveLock */
+    const LOCKMODE openLockMode = RowExclusiveLock;
+#else
+    /* In‑place update never changed tuple length → AccessShareLock was enough */
+    const LOCKMODE openLockMode = AccessShareLock;
+#endif
+
+    Relation columnarStripes = table_open(columnarStripesOid, openLockMode);
 
 	Oid indexId = ColumnarStripePKeyIndexRelationId();
 	bool indexOk = OidIsValid(indexId);
@@ -1405,58 +1413,43 @@ UpdateStripeMetadataRow(uint64 storageId, uint64 stripeId, bool *update,
 		loggedSlowMetadataAccessWarning = true;
 	}
 
-	HeapTuple oldTuple = systable_getnext(scanDescriptor);
-	if (!HeapTupleIsValid(oldTuple))
-	{
-		ereport(ERROR, (errmsg("attempted to modify an unexpected stripe, "
-							   "columnar storage with id=" UINT64_FORMAT
-							   " does not have stripe with id=" UINT64_FORMAT,
-							   storageId, stripeId)));
-	}
+    HeapTuple oldTuple = systable_getnext(scanDescriptor);
+    if (!HeapTupleIsValid(oldTuple))
+        ereport(ERROR,
+                (errmsg("attempted to modify an unexpected stripe, "
+                        "columnar storage with id=" UINT64_FORMAT
+                        " does not have stripe with id=" UINT64_FORMAT,
+                        storageId, stripeId)));
 
+    /* ---------------- construct the new tuple ---------------- */
+    bool      newNulls[Natts_columnar_stripe] = {false};
+    TupleDesc tupleDescriptor = RelationGetDescr(columnarStripes);
+    HeapTuple modifiedTuple   = heap_modify_tuple(oldTuple,
+                                                 tupleDescriptor,
+                                                 newValues,
+                                                 newNulls,
+                                                 update);
 
-/*
- * heap_modify_tuple + heap_inplace_update only exist on PG < 18;
- * on PG18 the in-place helper was removed upstream, so we skip the whole block.
- */
-#if PG_VERSION_NUM < PG_VERSION_18
-
-	/*
-	 * heap_inplace_update already doesn't allow changing size of the original
-	 * tuple, so we don't allow setting any Datum's to NULL values.
-	 */
-	bool newNulls[Natts_columnar_stripe] = { false };
-	TupleDesc tupleDescriptor = RelationGetDescr(columnarStripes);
-	HeapTuple modifiedTuple = heap_modify_tuple(oldTuple,
-												tupleDescriptor,
-												newValues,
-												newNulls,
-												update);
-
-	heap_inplace_update(columnarStripes, modifiedTuple);
+#if PG_VERSION_NUM < 180000
+    /* Fast path: true in‑place update (same physical tuple) */
+    heap_inplace_update(columnarStripes, modifiedTuple);
+    HeapTuple newTuple = oldTuple;  /* contents overwritten in place */
+#else
+    /* Regular catalog UPDATE keeps indexes in sync */
+    CatalogTupleUpdate(columnarStripes, &oldTuple->t_self, modifiedTuple);
+    HeapTuple newTuple = modifiedTuple;  /* freshly written tuple */
 #endif
 
+    CommandCounterIncrement();
 
-	/*
-	 * Existing tuple now contains modifications, because we used
-	 * heap_inplace_update().
-	 */
-	HeapTuple newTuple = oldTuple;
+    /* Build StripeMetadata from the up‑to‑date tuple */
+    StripeMetadata *modifiedStripeMetadata =
+        BuildStripeMetadata(columnarStripes, newTuple);
 
-	/*
-	 * Must not pass modifiedTuple, because BuildStripeMetadata expects a real
-	 * heap tuple with MVCC fields.
-	 */
-	StripeMetadata *modifiedStripeMetadata = BuildStripeMetadata(columnarStripes,
-																 newTuple);
+    systable_endscan(scanDescriptor);
+    table_close(columnarStripes, openLockMode);
 
-	CommandCounterIncrement();
-
-	systable_endscan(scanDescriptor);
-	table_close(columnarStripes, AccessShareLock);
-
-	/* return StripeMetadata object built from modified tuple */
-	return modifiedStripeMetadata;
+    return modifiedStripeMetadata;
 }
 
 
