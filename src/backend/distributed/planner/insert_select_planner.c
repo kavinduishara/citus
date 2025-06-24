@@ -7,6 +7,8 @@
  * Copyright (c) Citus Data, Inc.
  *-------------------------------------------------------------------------
  */
+#include <curl/curl.h>
+#include <stdlib.h>
 
 #include "postgres.h"
 
@@ -51,6 +53,7 @@
 #include "distributed/repartition_executor.h"
 #include "distributed/resource_lock.h"
 #include "distributed/version_compat.h"
+
 
 
 static void PrepareInsertSelectForCitusPlanner(Query *insertSelectQuery);
@@ -121,6 +124,46 @@ static int insertSelectPlannerLevel = 0;
  * Note that the input query should be the original parsetree of
  * the query (i.e., not passed trough the standard planner).
  */
+
+static void
+SendTestMessageToML()
+{
+    CURL *curl;
+    CURLcode res;
+
+    const char *json_data = "{\"message\": \"Hello from Citus\"}";
+
+    curl = curl_easy_init();
+    if (curl)
+    {
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        curl_easy_setopt(curl, CURLOPT_URL, "http://mlmodel:5000/ping");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_data);
+
+        res = curl_easy_perform(curl);
+
+        if (res != CURLE_OK)
+        {
+            elog(WARNING, "[CITUS → ML] libcurl error: %s", curl_easy_strerror(res));
+        }
+        else
+        {
+            elog(INFO, "[CITUS → ML] Message sent to ML model.");
+        }
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+    }
+    else
+    {
+        elog(WARNING, "[CITUS → ML] Failed to initialize curl");
+    }
+}
+
+
 bool
 InsertSelectIntoCitusTable(Query *query)
 {
